@@ -1,0 +1,7 @@
+{
+  "name": "proofpatch-sakura-python-demo",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node verification/verify.mjs --baseline" },
+  "engines": { "node": ">=22" }
+}

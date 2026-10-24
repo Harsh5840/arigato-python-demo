@@ -1,0 +1,108 @@
+name: Trusted Python candidate evidence
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('ProofPatch {0}', inputs.run_id) || 'Affected Python baseline classification' }}
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      base_sha:
+        description: Frozen baseline SHA on main
+        required: true
+        type: string
+      head_sha:
+        description: Candidate direct-child SHA
+        required: true
+        type: string
+      run_id:
+        description: ProofPatch graph run identifier
+        required: true
+        type: string
+permissions:
+  contents: read
+defaults:
+  run:
+    shell: bash --noprofile --norc -e -o pipefail {0}
+concurrency:
+  group: python-evidence-${{ github.event_name }}-${{ inputs.run_id || github.ref }}
+  cancel-in-progress: true
+jobs:
+  affected-baseline:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22'
+      - name: Classify the affected inventory without installing it
+        run: |
+          npm test
+          echo 'Requests 2.31.0 is intentionally affected. This passing job checks fixture setup, not application security. The baseline was not installed or executed.' >> "$GITHUB_STEP_SUMMARY"
+  candidate-evidence:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      BASE_SHA: ${{ inputs.base_sha }}
+      HEAD_SHA: ${{ inputs.head_sha }}
+      PROOFPATCH_RUN_ID: ${{ inputs.run_id }}
+      WORKFLOW_SHA: ${{ github.sha }}
+      WORKFLOW_REF: ${{ github.ref }}
+    steps:
+      - name: Check exact repository, run and workflow identities
+        run: |
+          [[ "$GITHUB_REPOSITORY" == 'Harsh5840/arigato-python-demo' ]]
+          [[ "$BASE_SHA" =~ ^[a-f0-9]{40}$ ]]
+          [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]]
+          [[ "$PROOFPATCH_RUN_ID" =~ ^[a-zA-Z0-9_-]{4,100}$ ]]
+          [[ "$WORKFLOW_REF" == 'refs/heads/main' ]]
+          [[ "$BASE_SHA" == "$WORKFLOW_SHA" ]]
+      - name: Checkout frozen baseline oracle
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: Harsh5840/arigato-python-demo
+          ref: ${{ env.BASE_SHA }}
+          path: oracle
+          persist-credentials: false
+      - name: Checkout candidate without persisted credentials
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: Harsh5840/arigato-python-demo
+          ref: ${{ env.HEAD_SHA }}
+          path: candidate
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22'
+      - name: Validate scope, frozen oracle and authoritative repair version
+        run: |
+          mkdir -p artifacts
+          node oracle/verification/verify.mjs prepare candidate "$BASE_SHA" "$HEAD_SHA" artifacts/verification.json
+      - name: Download binary wheels for the approved candidate only
+        run: |
+          mkdir -p candidate/wheels
+          docker run --rm --user "$(id -u):$(id -g)" --mount "type=bind,source=$GITHUB_WORKSPACE/candidate,target=/data" --workdir /data python:3.12-slim-bookworm@sha256:6a0e06f5ba0b373d051aabd3fffb9b873f27f9a2a3a14bcbe37dee6f0e3bbc70 python -m pip download --only-binary=:all: --no-cache-dir --dest /data/wheels --requirement /data/requirements.txt
+      - name: Build candidate with no build network
+        run: docker build --pull --network none -t sakura-python-candidate candidate
+      - name: Execute frozen business checks in isolated candidate runtime
+        run: |
+          EXPECTED_VERSION=$(node -e 'const fs=require("node:fs");console.log(JSON.parse(fs.readFileSync("artifacts/verification.json")).expected_version)')
+          docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --cpus 1 --memory 128m --pids-limit 64 --env "EXPECTED_VERSION=$EXPECTED_VERSION" --mount "type=bind,source=$GITHUB_WORKSPACE/oracle/verification,target=/oracle,readonly" --entrypoint python sakura-python-candidate /oracle/business.py > artifacts/runtime.json
+          node oracle/verification/verify.mjs finish artifacts/verification.json artifacts/runtime.json
+      - name: Explain remaining human review
+        if: always()
+        run: |
+          echo '### Fictional Sakura Python evidence' >> "$GITHUB_STEP_SUMMARY"
+          printf 'Frozen base: `%s`\n\nCandidate: `%s`\n\n' "$BASE_SHA" "$HEAD_SHA" >> "$GITHUB_STEP_SUMMARY"
+          echo 'Read the evidence artifact and actual step outcomes. This checks dependency inventory and business behavior. It does not prove exploitability, deployment, universal security or merge approval.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Preserve run-bound verification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: proofpatch-${{ inputs.run_id }}
+          path: artifacts/
+          retention-days: 7
